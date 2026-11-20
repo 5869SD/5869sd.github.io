@@ -31,7 +31,7 @@ const server = http.createServer((req, res) => {
     urlPath = urlPath.slice('/download'.length);
   }
 
-  if (!urlPath || urlPath === '/') urlPath = '/christmas-tree.html';
+  if (!urlPath || urlPath === '/') urlPath = '/index.html';
 
   const rel = path.normalize(urlPath).replace(/^[\\/]+/, '');
   const file = path.join(ROOT, rel);

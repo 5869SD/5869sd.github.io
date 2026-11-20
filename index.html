@@ -258,6 +258,14 @@
     <div class="lab"><span>树的高度</span><b data-out="height">1.00</b></div>
     <input type="range" data-key="height" min="0.5" max="1.2" step="0.01" value="1">
   </div>
+  <div class="row">
+    <div class="lab"><span>树的半径</span><b data-out="treeRadius">1.00</b></div>
+    <input type="range" data-key="treeRadius" min="0.6" max="1.6" step="0.02" value="1">
+  </div>
+  <div class="row">
+    <div class="lab"><span>雪花强度</span><b data-out="snowLevel">2.00</b></div>
+    <input type="range" data-key="snowLevel" min="0" max="3" step="0.05" value="2">
+  </div>
 
   <div class="toggles">
     <label class="switch"><input type="checkbox" data-key="autoSpin" checked><i></i><span>自动旋转</span></label>
@@ -269,7 +277,7 @@
   <footer id="stats">1600 颗星光 · 120 FPS</footer>
 </aside>
 
-<div class="hint">拖动旋转 · 滚轮缩放 · 双击归位 · 空格暂停</div>
+<div class="hint">滚轮缩放 · 双击归位 · 空格暂停</div>
 
 <script>
 (() => {
@@ -291,6 +299,8 @@
     twinkle: 1.1,     // 闪烁速度
     spin: 0.35,       // 自转速度
     height: 1,        // 树高
+    treeRadius: 1,    // 树底半径
+    snowLevel: 2,     // 雪花强度
     autoSpin: true,
     snow: true
   };
@@ -308,6 +318,12 @@
   let cx = 0, cy = 0;      // 画面中树中心点
   let treeH = 420;         // 树高(px)：顶端到底端的距离
   let baseR = 140;         // 树底半径(px)：只跟屏幕尺寸有关，不受高度影响
+  let treeR = 140;         // 树底半径(px)：可调，= baseR * treeRadius
+  let baseRX = 0;          // 底盘在屏幕上的椭圆半径
+  let baseRY = 0;
+  let platScale = 1;       // 底盘与礼物的整体缩放（跟着树的半径走）
+  let giftShiftPx = 0;     // 礼物堆的水平平移，用来维持它与树的间距
+  let camDist = 900;       // 相机距离（越小透视越强、3D 感越明显）
   let refSize = 520;       // 屏幕基准尺寸（宽度、光点大小、顶部星的大小都由它决定）
   let groundY = 0;         // 地面高度
 
@@ -392,68 +408,307 @@
   }
   const whiteSprite = makeDot(210, 22);
 
-  /* ========================= 生成星光树 ========================= */
+  /* ========================= 生成星光：树 + 底座 + 礼物盒 ========================= */
   const FESTIVE = [0, 20, 46, 92, 140, 176, 204, 266, 300, 336];
 
   function buildLights() {
-    const n = Math.round(cfg.count);
-    const arr = new Array(n);
-    for (let i = 0; i < n; i++) {
-      // 越靠近底部越密（圆锥表面积随半径增大）
-      const t = 1 - Math.sqrt(Math.random());        // 0=底部 1=树尖
-      const rBase = Math.pow(1 - t, 1.08);
+    const arr = [];
+    buildTreeLights(arr);
+    buildBaseLights(arr);
+    buildGiftLights(arr);
+    lights = arr;
+  }
 
-      const garland = Math.random() < 0.58;          // 大部分沿彩带螺旋排布
-      let ang, rad;
-      if (garland) {
-        ang = t * cfg.turns * TAU + rand(-0.14, 0.14);
-        rad = rBase * rand(0.94, 1.0);
-      } else {
+  // 统一粒子工厂：kind 0=树(y 以树高为单位) 1=底座 2=礼物(y 以树底半径为单位)
+  function mkLight(arr, x, y, z, hue, sizeK, bright, kind, delayMax) {
+    const oAng = Math.random() * TAU;
+    const oDist = kind === 0 ? rand(1.3, 3.4) : rand(0.8, 2.8);
+    arr.push({
+      x: x, y: y, z: z,
+      hue: hue,
+      sizeK: sizeK,
+      bright: bright,
+      phase: rand(0, TAU),
+      speed: rand(0.7, 2.6),
+      sparkle: Math.random() < 0.24,
+      kind: kind,
+      ox: kind === 0 ? Math.cos(oAng) * oDist : x + Math.cos(oAng) * oDist,
+      oy: kind === 0 ? rand(-0.45, 1.75) : y + rand(-0.10, 0.55),
+      oz: kind === 0 ? Math.sin(oAng) * oDist : z + Math.sin(oAng) * oDist,
+      delay: Math.random() * (delayMax || 0.35)
+    });
+  }
+
+  // —— 圣诞树本体：双螺旋灯带 + 分层枝环，勾出清楚的锥形轮廓 ——
+  function buildTreeLights(arr) {
+    const n = Math.round(cfg.count);
+    for (let i = 0; i < n; i++) {
+      const roll = Math.random();
+      let t, ang, rad;
+
+      if (roll < 0.60) {
+        // 双螺旋灯带：两条错开 180°，缠绕着往上盘
+        t = 1 - Math.sqrt(Math.random());
+        const rBase = Math.pow(1 - t, 1.08);
+        const strand = Math.random() < 0.5 ? 0 : Math.PI;
+        ang = t * cfg.turns * TAU + strand + rand(-0.10, 0.10);
+        rad = rBase * rand(0.93, 1.0);
+      } else if (roll < 0.90) {
+        // 分层枝环：6 层水平枝叶，把树的基础轮廓和层次显出来
+        const tier = (Math.random() * 6) | 0;
+        t = clamp(0.07 + tier * 0.15 + rand(-0.025, 0.025), 0, 1);
+        const rBase = Math.pow(1 - t, 1.08);
         ang = Math.random() * TAU;
-        rad = rBase * rand(0.5, 1.0);
+        rad = rBase * rand(0.88, 1.0);
+      } else {
+        // 少量内部散点，补一点体积感
+        t = 1 - Math.sqrt(Math.random());
+        const rBase = Math.pow(1 - t, 1.08);
+        ang = Math.random() * TAU;
+        rad = rBase * rand(0.35, 0.8);
       }
 
       const hue = Math.random() < cfg.colorful
         ? FESTIVE[(Math.random() * FESTIVE.length) | 0] + rand(-7, 7)
         : cfg.hue + rand(-9, 9);
 
-      // 少量“大灯珠”做点缀
-      let sizeK = rand(0.55, 1.35);
+      let sizeK = rand(0.55, 1.35);                  // 少量“大灯珠”做点缀
       if (Math.random() < 0.03) sizeK *= 1.7;
 
-      // 出厂动画的散乱起点：绕树四周随机方向，散布在树外围不远处（归一化坐标）
-      const oAng = Math.random() * TAU;
-      const oDist = rand(1.3, 3.4);
-
-      arr[i] = {
-        x: Math.cos(ang) * rad,
-        y: clamp(t + rand(-0.008, 0.008), 0, 1),
-        z: Math.sin(ang) * rad,
-        hue: hue,
-        sizeK: sizeK,
-        bright: rand(0.5, 1),
-        phase: rand(0, TAU),
-        speed: rand(0.7, 2.6),
-        sparkle: Math.random() < 0.24,
-        ox: Math.cos(oAng) * oDist,
-        oy: rand(-0.45, 1.75),
-        oz: Math.sin(oAng) * oDist,
-        delay: Math.random() * 0.35      // 错峰起飞，聚拢过程更自然
-      };
+      mkLight(arr, Math.cos(ang) * rad, clamp(t + rand(-0.008, 0.008), 0, 1), Math.sin(ang) * rad,
+        hue, sizeK, rand(0.5, 1), 0, 0.35);
     }
-    lights = arr;
+  }
+
+  // —— 星光底座：三层星环 + 侧壁 + 台面浮尘，全部由同一种光点组成 ——
+  function buildBaseLights(arr) {
+    const hue0 = cfg.hue;
+
+    // 前缘亮、后缘暗：底盘也因此有立体厚度
+    const frontK = (a) => 0.42 + 0.58 * (1 - Math.sin(a)) / 2;
+
+    const ring = (radius, y, count, sizeK, bright) => {
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * TAU;
+        const r = radius * rand(0.995, 1.005);
+        mkLight(arr, Math.cos(a) * r, y + rand(-0.005, 0.005), Math.sin(a) * r,
+          hue0 + rand(-8, 8), sizeK * rand(0.8, 1.25), bright * frontK(a) * rand(0.75, 1), 1, 0.2);
+      }
+    };
+    ring(1.75, 0.000, 168, 0.62, 0.95);   // 台沿
+    ring(1.63, -0.055, 78, 0.55, 0.70);   // 下沿，做出厚度
+    ring(1.35, 0.012, 84, 0.50, 0.60);    // 内圈
+
+    // 侧壁竖向连线
+    for (let i = 0; i < 30; i++) {
+      const a = (i / 30) * TAU;
+      for (let k = 1; k <= 2; k++) {
+        const t = k / 3;
+        const r = 1.75 + (1.63 - 1.75) * t;
+        mkLight(arr, Math.cos(a) * r, -0.055 * t, Math.sin(a) * r,
+          hue0 + rand(-10, 10), 0.45 * rand(0.8, 1.2), 0.55 * frontK(a) * rand(0.6, 1), 1, 0.2);
+      }
+    }
+
+    // 台面浮尘
+    for (let i = 0; i < 110; i++) {
+      const a = Math.random() * TAU;
+      const r = Math.sqrt(Math.random()) * 1.70;
+      mkLight(arr, Math.cos(a) * r, rand(-0.004, 0.022), Math.sin(a) * r,
+        hue0 + rand(-12, 12), rand(0.35, 0.7), rand(0.35, 0.8) * frontK(a), 1, 0.22);
+    }
+  }
+
+  // —— 星光礼物盒：四个（下三上一），在圣诞树左侧的底盘上独立堆叠 ——
+  const GIFT_BOXES = [
+    { x: -1.10, z: -0.16, side: 0.28, y: 0.00, hue: 356, ribbon: 45 },   // 左后
+    { x: -1.50, z: -0.16, side: 0.28, y: 0.00, hue: 140, ribbon: 45 },   // 右后
+    { x: -1.30, z: -0.50, side: 0.32, y: 0.00, hue: 216, ribbon: 45 },   // 正前
+    { x: -1.30, z: -0.28, side: 0.26, y: 0.28, hue: 44, ribbon: 356 }    // 压在三个上面
+  ];
+
+  function buildGiftLights(arr) {
+    const GS = 1 / 1.3;                              // 礼盒整体缩小 1.3 倍
+    const CX0 = -1.30, CZ0 = -0.30;                   // 缩放基准点 = 礼物堆中心
+
+    const line = (x0, y0, z0, x1, y1, z1, hue, n, sizeK, bright) => {
+      for (let i = 0; i <= n; i++) {
+        const t = i / n;
+        mkLight(arr,
+          x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, z0 + (z1 - z0) * t,
+          hue + rand(-8, 8), sizeK * rand(0.85, 1.15), bright * rand(0.75, 1), 2, 0.3);
+      }
+    };
+
+    for (let b = 0; b < GIFT_BOXES.length; b++) {
+      const g = GIFT_BOXES[b];
+
+      // 以堆中心为基准点整体缩小
+      const s = g.side * GS;
+      const gx = CX0 + (g.x - CX0) * GS;
+      const gz = CZ0 + (g.z - CZ0) * GS;
+      const x0 = gx - s / 2, x1 = gx + s / 2;
+      const z0 = gz - s / 2, z1 = gz + s / 2;
+      const y0 = g.y * GS, y1 = y0 + s;
+      const h = g.hue, rh = g.ribbon;
+
+      // 上下各四条棱
+      line(x0, y0, z0, x1, y0, z0, h, 9, 0.60, 0.72);
+      line(x0, y0, z1, x1, y0, z1, h, 9, 0.60, 0.72);
+      line(x0, y0, z0, x0, y0, z1, h, 9, 0.60, 0.72);
+      line(x1, y0, z0, x1, y0, z1, h, 9, 0.60, 0.72);
+      line(x0, y1, z0, x1, y1, z0, h, 9, 0.68, 0.86);
+      line(x0, y1, z1, x1, y1, z1, h, 9, 0.68, 0.86);
+      line(x0, y1, z0, x0, y1, z1, h, 9, 0.68, 0.86);
+      line(x1, y1, z0, x1, y1, z1, h, 9, 0.68, 0.86);
+      // 四条竖棱
+      line(x0, y0, z0, x0, y1, z0, h, 10, 0.64, 0.80);
+      line(x1, y0, z0, x1, y1, z0, h, 10, 0.64, 0.80);
+      line(x0, y0, z1, x0, y1, z1, h, 10, 0.64, 0.80);
+      line(x1, y0, z1, x1, y1, z1, h, 10, 0.64, 0.80);
+
+      // 四个立面的竖向缎带
+      line(x0, y0, gz, x0, y1, gz, rh, 9, 0.50, 0.52);
+      line(x1, y0, gz, x1, y1, gz, rh, 9, 0.50, 0.52);
+      line(gx, y0, z0, gx, y1, z0, rh, 9, 0.50, 0.52);
+      line(gx, y0, z1, gx, y1, z1, rh, 9, 0.50, 0.52);
+
+      // 顶面十字缎带
+      line(x0, y1, gz, x1, y1, gz, rh, 9, 0.56, 0.60);
+      line(gx, y1, z0, gx, y1, z1, rh, 9, 0.56, 0.60);
+
+      // 盒内的柔光，让盒子“成块”
+      for (let i = 0; i < 6; i++) {
+        mkLight(arr,
+          gx + rand(-s * 0.32, s * 0.32),
+          y0 + rand(s * 0.22, s * 0.78),
+          gz + rand(-s * 0.32, s * 0.32),
+          h + rand(-12, 12), rand(1.1, 1.8), rand(0.05, 0.12), 2, 0.3);
+      }
+
+      // 蝴蝶结
+      for (let i = 0; i < 8; i++) {
+        const a = Math.random() * TAU;
+        const r = rand(0.008, 0.045);
+        mkLight(arr, gx + Math.cos(a) * r, y1 + rand(0.008, 0.04), gz + Math.sin(a) * r,
+          rh + rand(-10, 10), rand(0.55, 0.8), rand(1.0, 1.25), 2, 0.3);
+      }
+    }
+  }
+
+  // 树和礼物在底盘上的接触阴影：让物体“坐”在台面上，而不是飘着
+  function drawContactShadows() {
+    const gi = clamp((intro - 0.18) / 0.5, 0, 1);
+    if (gi <= 0) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = gi;
+
+    // 树的阴影
+    const w = Math.max(20, treeR * 1.12);
+    ctx.save();
+    ctx.translate(cx, groundY + baseRY * 0.10);
+    ctx.scale(1, Math.max(0.08, (baseRY * 0.46) / w));
+    const g1 = ctx.createRadialGradient(0, 0, 0, 0, 0, w);
+    g1.addColorStop(0.00, 'rgba(5,8,16,0.42)');
+    g1.addColorStop(0.55, 'rgba(5,8,16,0.20)');
+    g1.addColorStop(1.00, 'rgba(5,8,16,0)');
+    ctx.fillStyle = g1;
+    ctx.beginPath();
+    ctx.arc(0, 0, w, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    // 礼物堆的阴影
+    const gx = cx + (-1.30 * baseR + giftShiftPx);
+    const gy = groundY + baseRY * 0.16;
+    const gw = Math.max(10, baseR * 0.42);
+    ctx.save();
+    ctx.translate(gx, gy);
+    ctx.scale(1, 0.34);
+    const g2 = ctx.createRadialGradient(0, 0, 0, 0, 0, gw);
+    g2.addColorStop(0.00, 'rgba(5,8,16,0.50)');
+    g2.addColorStop(0.60, 'rgba(5,8,16,0.24)');
+    g2.addColorStop(1.00, 'rgba(5,8,16,0)');
+    ctx.fillStyle = g2;
+    ctx.beginPath();
+    ctx.arc(0, 0, gw, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // 底座脚下的辉光（只是光，真正的底座由上面的粒子组成）
+  function drawBaseGlow() {
+    const gi = clamp((intro - 0.12) / 0.55, 0, 1);
+    if (gi <= 0) return;
+    const rx = baseR * 1.75 * platScale;
+    // 底座不参与旋转/俯仰，它的椭圆形状来自透视，这里按同一套公式算出来
+    const camB = camDist;
+    const pf = camB / Math.max(1, camB - rx);
+    const pb = camB / (camB + rx);
+    const ry = Math.max(2, (treeH * 0.5) * (pf - pb) * 0.5);
+    const pulse = 0.85 + 0.15 * Math.sin(time * 1.3);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.translate(cx, groundY);
+    ctx.scale(1, ry / rx);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+    g.addColorStop(0.00, 'hsla(' + cfg.hue + ',95%,80%,' + (0.11 * gi * pulse * cfg.glow) + ')');
+    g.addColorStop(0.60, 'hsla(' + cfg.hue + ',95%,68%,' + (0.045 * gi * pulse * cfg.glow) + ')');
+    g.addColorStop(0.95, 'hsla(' + cfg.hue + ',95%,62%,' + (0.015 * gi * pulse * cfg.glow) + ')');
+    g.addColorStop(1.00, 'hsla(' + cfg.hue + ',95%,60%,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, rx, 0, TAU);
+    ctx.fill();
+    ctx.restore();
+    ctx.globalAlpha = 1;
   }
 
   /* ========================= 尺寸 & 背景 ========================= */
   function layout() {
     refSize = Math.min(H * 0.70, W * 1.35);
-    groundY = H * 0.88;
+
+    // 礼盒与树的间距：6 个单位（1 单位 = 0.05 个树底半径）
+    const GIFT_UNIT = 0.05;
+    const stackHalf = 0.34 * (1 / 1.3);             // 礼物堆半宽（已缩小 1.3 倍）
+    const giftCenterU = cfg.treeRadius + 6 * GIFT_UNIT + stackHalf;
+    const platRU = giftCenterU + stackHalf + 0.35;  // 底盘半径（以树底半径为单位）
+    platScale = platRU / 1.75;                      // 底盘随树半径整体缩放
+
+    // 底座 + 礼物堆比树本身宽，窄屏时把整组等比缩小，保证它们都在画面内
+    const compHalf = platRU * 1.2 * 0.335 * refSize;
+    const limit = W * 0.47;
+    if (compHalf > limit) refSize *= limit / compHalf;
+
     cx = W * 0.5;
 
     // 宽度只跟屏幕尺寸有关；「树的高度」只改变顶端到底端的垂直距离：
     // 底端固定在地面线，顶端上下移动（树变高/变矮，而不是整体放大缩小）
     baseR = refSize * 0.335;
+    treeR = baseR * cfg.treeRadius;                 // 树底半径可调
+    camDist = refSize * 1.7;                        // 相机更近 → 透视更强、更立体
+
+    // 底盘在屏幕上的椭圆比例先算出来，用来给底盘前缘留出空间
+    baseRX = baseR * 1.75 * platScale;
+    const camB = camDist;
+    const pf = camB / Math.max(1, camB - baseRX);
+    const pb = camB / (camB + baseRX);
+    const ryUnit = (pf - pb) * 0.25;                // baseRY = treeH * ryUnit
+
+    // 地面线：底盘整体（前后缘）要落在画面内
+    groundY = Math.min(H * 0.88, H - refSize * cfg.height * ryUnit - H * 0.03);
+
     treeH = Math.min(refSize * cfg.height, groundY - H * 0.05);
+    baseRY = Math.max(2, treeH * ryUnit);
+
+    // 把礼物堆中心推到「树半径 + 间距 + 半宽」处，与树保持固定间距
+    giftShiftPx = (-giftCenterU + 1.30) * baseR;
 
     cy = groundY - treeH * 0.5;
   }
@@ -511,20 +766,22 @@
   }
 
   function newFlake(spread) {
+    const big = Math.random() < 0.08;                    // 少量近景大雪花
     return {
       x: Math.random() * W,
-      y: spread ? Math.random() * H : -12,
-      r: rand(0.55, 2.0),
-      vy: rand(14, 46),
-      vx: rand(-8, 8),
+      y: spread ? Math.random() * H : -14 - Math.random() * 70,
+      r: big ? rand(2.8, 4.4) : rand(0.5, 2.1),
+      vy: big ? rand(30, 56) : rand(12, 46),
+      vx: rand(-11, 11),
       ph: rand(0, TAU),
-      front: Math.random() < 0.34,
-      a: rand(0.22, 0.72)
+      front: big ? Math.random() < 0.65 : Math.random() < 0.3,
+      a: big ? rand(0.09, 0.20) : rand(0.28, 0.85),
+      rest: 0                                          // >0 表示已落到底盘上，正在停留
     };
   }
   function initSnow() {
     snow = [];
-    const n = Math.round((W * H) / 16500);
+    const n = Math.round((W * H) / 6200 * cfg.snowLevel);
     for (let i = 0; i < n; i++) snow.push(newFlake(true));
   }
 
@@ -558,18 +815,39 @@
   const INTRO_DUR = 3.2;
   let intro = 0;
 
+  // 雪花落到底盘上的落点高度（不在底盘范围内返回一个极大值，等于直接飘过去）
+  function snowFloorY(x) {
+    if (baseRY <= 0) return 1e9;
+    const u = (x - cx) / baseRX;
+    if (u <= -0.97 || u >= 0.97) return 1e9;
+    return groundY + baseRY * Math.sqrt(1 - u * u) * 0.5;
+  }
+
   function update(dt) {
     if (intro < 1) intro = Math.min(1, intro + dt / INTRO_DUR);
-    if (cfg.autoSpin && !dragging) view.yaw += cfg.spin * dt;
+    if (cfg.autoSpin) view.yaw += cfg.spin * dt;
     view.zoom += (view.targetZoom - view.zoom) * Math.min(1, dt * 10);
 
     // 雪
     if (cfg.snow) {
+      const gust = Math.sin(time * 0.33) * 14;           // 缓慢变化的阵风
       for (let i = 0; i < snow.length; i++) {
         const f = snow[i];
+
+        // 已经落在底盘上的雪花：静静停留，3 秒后化掉
+        if (f.rest > 0) {
+          f.rest -= dt;
+          if (f.rest <= 0) snow[i] = newFlake(false);
+          continue;
+        }
+
         f.y += f.vy * dt;
-        f.x += (f.vx + Math.sin(time * 0.7 + f.ph) * 9) * dt;
-        if (f.y > H + 14 || f.x < -30 || f.x > W + 30) snow[i] = newFlake(false);
+        f.x += (f.vx + gust + Math.sin(time * 1.1 + f.ph) * 10) * dt;
+
+        // 落进底盘范围就被接住，停留 3 秒
+        if (f.y >= snowFloorY(f.x)) { f.rest = 3; continue; }
+
+        if (f.y > H + 16 || f.x < -40 || f.x > W + 40) snow[i] = newFlake(false);
       }
     }
   }
@@ -585,10 +863,13 @@
     const cosP = Math.cos(view.pitch), sinP = Math.sin(view.pitch);
 
     drawGroundGlow();
+    drawBaseGlow();
+    drawContactShadows();
     drawSkyStars();
     drawSnow(false);
     drawTree(cosY, sinY, cosP, sinP);
     drawTopStar(cosP, sinP);
+    drawGiftOutlines();
     drawSnow(true);
 
     ctx.globalAlpha = 1;
@@ -600,10 +881,10 @@
     ctx.save();
     ctx.translate(cx, groundY);
     ctx.scale(1, 0.3);
-    const r = Math.max(60, baseR * 2.7);
+    const r = Math.max(60, baseR * 2.4);
     const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-    g.addColorStop(0, 'hsla(' + cfg.hue + ',92%,62%,' + (0.28 * pulse * cfg.glow) + ')');
-    g.addColorStop(0.45, 'hsla(' + cfg.hue + ',92%,56%,' + (0.09 * pulse * cfg.glow) + ')');
+    g.addColorStop(0, 'hsla(' + cfg.hue + ',92%,62%,' + (0.13 * pulse * cfg.glow) + ')');
+    g.addColorStop(0.45, 'hsla(' + cfg.hue + ',92%,56%,' + (0.045 * pulse * cfg.glow) + ')');
     g.addColorStop(1, 'hsla(' + cfg.hue + ',92%,50%,0)');
     ctx.fillStyle = g;
     ctx.beginPath();
@@ -627,10 +908,21 @@
     if (!cfg.snow) return;
     for (let i = 0; i < snow.length; i++) {
       const f = snow[i];
-      if (f.front !== front) continue;
-      const tw = 0.62 + 0.38 * Math.sin(time * 1.5 + f.ph);
-      const w = f.r * 8;
-      ctx.globalAlpha = f.a * tw * (front ? 0.95 : 0.6);
+      const resting = f.rest > 0;
+      // 已经落到底盘上的雪花只在「前景层」画（在底盘和树之上）
+      if (resting ? !front : f.front !== front) continue;
+
+      if (resting) {
+        // 落在底盘上的雪花：更白更实，停留 3 秒，最后 0.6 秒淡出
+        const w = Math.max(6, f.r * 13);
+        ctx.globalAlpha = clamp(0.92 * Math.min(1, f.rest / 0.6), 0, 1);
+        ctx.drawImage(whiteSprite, f.x - w / 2, f.y - w / 2, w, w);
+        continue;
+      }
+
+      const tw = 0.55 + 0.45 * Math.sin(time * 1.4 + f.ph);
+      const w = f.r * 9;
+      ctx.globalAlpha = clamp(f.a * tw * (front ? 1 : 0.65), 0, 1);
       ctx.drawImage(whiteSprite, f.x - w / 2, f.y - w / 2, w, w);
     }
     ctx.globalAlpha = 1;
@@ -639,7 +931,7 @@
   function drawTree(cosY, sinY, cosP, sinP) {
     const zoom = view.zoom;
     const halfH = treeH * 0.5;
-    const camBase = refSize * 2.0;
+    const camBase = camDist;
     const unit = refSize * 0.0058;     // 单个光点基准半径（不随树高变化）
     const twSpeed = cfg.twinkle;
     let sparkles = 0;
@@ -658,16 +950,33 @@
         nz = L.oz + (L.z - L.oz) * settle;
       }
 
-      const wx = nx * baseR;
-      const wz = nz * baseR;
-      const wy = ny * treeH - halfH;
+      // 树：半径可调，随视角旋转
+      // 底盘：随树半径缩放，不旋转
+      // 礼物：整体平移到与树保持固定间距的位置，不旋转
+      let wx, wz;
+      if (L.kind === 0) {
+        wx = nx * treeR;
+        wz = nz * treeR;
+      } else if (L.kind === 1) {
+        wx = nx * baseR * platScale;
+        wz = nz * baseR * platScale;
+      } else {
+        wx = nx * baseR + giftShiftPx;
+        wz = nz * baseR;
+      }
+      // kind 0 的 y 以树高为单位；底座/礼物以树底半径为单位，保证礼物盒是立方比例
+      const wy = (L.kind === 0 ? ny * treeH : ny * baseR) - halfH;
+
+      // 树随视角旋转；底座和礼物固定在场景里，跟着镜头转的是树而不是它们
+      const cY = L.kind ? 1 : cosY, sY = L.kind ? 0 : sinY;
+      const cP = L.kind ? 1 : cosP, sP = L.kind ? 0 : sinP;
 
       // 绕 Y 轴旋转
-      const x1 = wx * cosY - wz * sinY;
-      const z1 = wx * sinY + wz * cosY;
+      const x1 = wx * cY - wz * sY;
+      const z1 = wx * sY + wz * cY;
       // 绕 X 轴俯仰
-      const y2 = wy * cosP - z1 * sinP;
-      const z2 = wy * sinP + z1 * cosP;
+      const y2 = wy * cP - z1 * sP;
+      const z2 = wy * sP + z1 * cP;
       // 透视
       const persp = camBase / (camBase + z2);
 
@@ -677,7 +986,8 @@
 
       // 闪烁
       const tw = 0.5 + 0.5 * Math.sin(time * L.speed * twSpeed + L.phase);
-      const depth = 0.5 + 0.5 * clamp((persp - 0.78) / 0.45, 0, 1);
+      // 立体感：正对镜头（近）的灯更亮更大，背面的灯明显暗一些
+      const depth = 0.26 + 0.92 * clamp((persp - 0.72) / 0.52, 0, 1);
       let a = (0.22 + 0.78 * tw) * L.bright * depth * cfg.glow * 0.95;
       if (settle < 1) {
         a *= 0.12 + 0.88 * settle;                                   // 飞行途中偏暗
@@ -702,6 +1012,131 @@
     ctx.globalAlpha = 1;
   }
 
+  // 礼物盒的光线框：把 12 条棱和缎带用细光描出来，盒子形状一眼可辨
+  function drawGiftOutlines() {
+    const a = clamp((intro - 0.45) / 0.4, 0, 1);
+    if (a <= 0) return;
+    const ease = a * a * (3 - 2 * a);
+
+    const halfH = treeH * 0.5;
+    const camBase = camDist;
+    const zoom = view.zoom;
+
+    // 与粒子完全一致的投影（礼物不旋转、不俯仰）
+    const proj = (x, y, z) => {
+      const wx = x * baseR + giftShiftPx;
+      const wy = y * baseR - halfH;
+      const wz = z * baseR;
+      const persp = camBase / (camBase + wz);
+      return [cx + wx * persp * zoom, cy - wy * persp * zoom];
+    };
+
+    const GS = 1 / 1.3;
+    const CX0 = -1.30, CZ0 = -0.30;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+
+    for (let b = 0; b < GIFT_BOXES.length; b++) {
+      const g = GIFT_BOXES[b];
+      const s = g.side * GS;
+      const gx = CX0 + (g.x - CX0) * GS;
+      const gz = CZ0 + (g.z - CZ0) * GS;
+      const y0 = g.y * GS, y1 = y0 + s;
+      const x0 = gx - s / 2, x1 = gx + s / 2;
+      const z0 = gz - s / 2, z1 = gz + s / 2;
+
+      // 8 个顶点
+      const v000 = proj(x0, y0, z0), v100 = proj(x1, y0, z0);
+      const v001 = proj(x0, y0, z1), v101 = proj(x1, y0, z1);
+      const v010 = proj(x0, y1, z0), v110 = proj(x1, y1, z0);
+      const v011 = proj(x0, y1, z1), v111 = proj(x1, y1, z1);
+
+      const edges = [
+        [v000, v100], [v001, v101], [v000, v001], [v100, v101],   // 底
+        [v010, v110], [v011, v111], [v010, v011], [v110, v111],   // 顶
+        [v000, v010], [v100, v110], [v001, v011], [v101, v111]    // 竖棱
+      ];
+
+      // 先画一层虚光，再画细实线，边缘有发光感
+      ctx.strokeStyle = 'hsla(' + g.hue + ',100%,70%,' + (0.18 * ease) + ')';
+      ctx.lineWidth = 3.2;
+      ctx.beginPath();
+      for (let i = 0; i < edges.length; i++) {
+        ctx.moveTo(edges[i][0][0], edges[i][0][1]);
+        ctx.lineTo(edges[i][1][0], edges[i][1][1]);
+      }
+      ctx.stroke();
+
+      ctx.strokeStyle = 'hsla(' + g.hue + ',100%,78%,' + (0.55 * ease) + ')';
+      ctx.lineWidth = 1.1;
+      ctx.stroke();
+
+      // 极淡的光面填充：让盒子有体积，仍然透出后面的星光
+      ctx.fillStyle = 'hsla(' + g.hue + ',100%,62%,' + (0.05 * ease) + ')';
+      ctx.beginPath();
+      ctx.moveTo(v000[0], v000[1]); ctx.lineTo(v100[0], v100[1]);
+      ctx.lineTo(v110[0], v110[1]); ctx.lineTo(v010[0], v010[1]);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = 'hsla(' + g.hue + ',100%,74%,' + (0.075 * ease) + ')';   // 顶面更亮
+      ctx.beginPath();
+      ctx.moveTo(v010[0], v010[1]); ctx.lineTo(v110[0], v110[1]);
+      ctx.lineTo(v111[0], v111[1]); ctx.lineTo(v011[0], v011[1]);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = 'hsla(' + g.hue + ',100%,55%,' + (0.038 * ease) + ')';   // 侧面更暗
+      ctx.beginPath();
+      ctx.moveTo(v100[0], v100[1]); ctx.lineTo(v101[0], v101[1]);
+      ctx.lineTo(v111[0], v111[1]); ctx.lineTo(v110[0], v110[1]);
+      ctx.closePath();
+      ctx.fill();
+
+      // 缎带：四个立面竖线 + 顶面十字
+      const rib = [
+        [proj(x0, y0, gz), proj(x0, y1, gz)],
+        [proj(x1, y0, gz), proj(x1, y1, gz)],
+        [proj(gx, y0, z0), proj(gx, y1, z0)],
+        [proj(gx, y0, z1), proj(gx, y1, z1)],
+        [proj(x0, y1, gz), proj(x1, y1, gz)],
+        [proj(gx, y1, z0), proj(gx, y1, z1)]
+      ];
+      ctx.strokeStyle = 'hsla(' + g.ribbon + ',100%,88%,' + (0.26 * ease) + ')';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      for (let i = 0; i < rib.length; i++) {
+        ctx.moveTo(rib[i][0][0], rib[i][0][1]);
+        ctx.lineTo(rib[i][1][0], rib[i][1][1]);
+      }
+      ctx.stroke();
+
+      // 顶面蝴蝶结：两个环 + 中心结
+      const perspC = camBase / (camBase + gz * baseR);
+      const px = baseR * perspC * zoom;
+      const bx = proj(gx, y1, gz);
+      const bw = s * 0.46 * px;
+      const bh = bw * 0.34;
+      ctx.strokeStyle = 'hsla(' + g.ribbon + ',100%,90%,' + (0.55 * ease) + ')';
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.ellipse(bx[0] - bw * 0.62, bx[1], bw * 0.58, bh, -0.5, 0, TAU);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(bx[0] + bw * 0.62, bx[1], bw * 0.58, bh, 0.5, 0, TAU);
+      ctx.stroke();
+      ctx.fillStyle = 'hsla(' + g.ribbon + ',100%,92%,' + (0.7 * ease) + ')';
+      ctx.beginPath();
+      ctx.arc(bx[0], bx[1], Math.max(1.2, bh * 0.55), 0, TAU);
+      ctx.fill();
+    }
+
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
   function drawTopStar(cosP, sinP) {
     // 出厂动画：等星光差不多聚拢完，树顶星芒才亮起
     const starIn = intro <= 0.72 ? 0 : (intro - 0.72) / 0.28;
@@ -711,7 +1146,7 @@
     const halfH = treeH * 0.5;
     const wy = treeH - halfH;      // 树尖（在旋转轴上）
     const z2 = wy * sinP;
-    const camBase = refSize * 2.0;
+    const camBase = camDist;
     const persp = camBase / (camBase + z2 * 0.6);
     const sx = cx;
     const sy = cy - (wy * cosP) * persp * view.zoom;
@@ -797,30 +1232,11 @@
   }
 
   /* ========================= 交互 ========================= */
-  let dragging = false;
-  let lastX = 0, lastY = 0;
-
+  // 拖动旋转已关闭：画布只保留滚轮缩放和双击归位
   canvas.addEventListener('pointerdown', (e) => {
-    // 手机上：点画面任意处即收起设置面板（鼠标点击不受影响）
+    // 手机上：点画面任意处即收起设置面板
     if (e.pointerType === 'touch' && !panel.classList.contains('closed')) setPanel(false);
-    dragging = true;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
   });
-
-  canvas.addEventListener('pointermove', (e) => {
-    if (!dragging) return;
-    const dx = e.clientX - lastX;
-    const dy = e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    view.yaw += dx * 0.007;
-    view.pitch = clamp(view.pitch - dy * 0.005, -0.62, 0.95);
-  });
-
-  canvas.addEventListener('pointerup', () => { dragging = false; });
-  canvas.addEventListener('pointercancel', () => { dragging = false; });
 
   canvas.addEventListener('wheel', (e) => {
     e.preventDefault();
@@ -846,7 +1262,9 @@
     glow: (v) => v.toFixed(2),
     twinkle: (v) => v.toFixed(2),
     spin: (v) => v.toFixed(2),
-    height: (v) => v.toFixed(2)
+    height: (v) => v.toFixed(2),
+    treeRadius: (v) => v.toFixed(2),
+    snowLevel: (v) => v.toFixed(2)
   };
 
   const ranges = Array.prototype.slice.call(document.querySelectorAll('input[type="range"][data-key]'));
@@ -882,7 +1300,8 @@
       paintRange(el);
       showOut(k);
 
-      if (k === 'height') layout();
+      if (k === 'height' || k === 'treeRadius') layout();
+      if (k === 'snowLevel') initSnow();
       if (k === 'count' || k === 'turns' || k === 'hue' || k === 'colorful') buildLights();
     });
     el.addEventListener('change', writeHash);
